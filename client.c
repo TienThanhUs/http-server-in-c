@@ -41,6 +41,8 @@ int main(){
         }
         if(strcmp(msg,"q!") == 0) 
         {
+            
+            send(fd_client , msg, strlen(msg),0);
             printf("Dang thoat ...\n");
             break;
         }
