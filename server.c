@@ -7,6 +7,9 @@
 #include<string.h>
 #include<unistd.h>
 #include<pthread.h>
+#include<sys/event.h>
+#include<sys/time.h>
+#include<fcntl.h>
 
 pthread_mutex_t m;
 int counter_client = 0;
@@ -31,19 +34,19 @@ void * handle_client(void * client_fd)
         printf("Client_%d:%s\n",fd_client,buffer);
     
 
-        printf("Server:");
+        char  * msg = "successfully connect !!!";
+        printf("Server_%d:%s\n",*(int*)client_fd,msg);
         fflush(stdout);// ep chuong trinh in ra man hinh thay vi giu trong buffer
-        char  msg[1024] = {0};
-        int c;
-        int i = 0; 
-        while((c = getc(stdin)) != '\n' && c != EOF)
-        {
-           if(i >= 1024)
-           {
-               break;
-           }
-           msg[i++] = c;
-        }
+//        int c;
+//       int i = 0; 
+       // while((c = getc(stdin)) != '\n' && c != EOF)
+        //{
+         //  if(i >= 1024)
+           //{
+            //   break;
+           //}
+           //msg[i++] = c;
+        //}
  
         send(*(int *)client_fd,msg,strlen(msg),0); 
     }
@@ -88,6 +91,7 @@ int main()
         pthread_mutex_lock(&m);
         counter_client++;
         pthread_mutex_unlock(&m);
+        printf("COUNTER_CLIENT:%d\n",counter_client);
         pthread_t thread;
         pthread_create(&thread,NULL,handle_client,client_fd);
         pthread_detach(thread); // Khong cho thread khac dung chung tai nguyen 
