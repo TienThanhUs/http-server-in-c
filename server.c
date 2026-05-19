@@ -10,6 +10,8 @@
 #include<sys/event.h>
 #include<sys/time.h>
 #include<fcntl.h>
+#include<sys/select.h>
+
 
 pthread_mutex_t m;
 int counter_client = 0;
@@ -79,6 +81,9 @@ int main()
     // lang nghe yeu cau ket noi tu client
     listen(fd_server,5);
 
+    fcntl(fd_server,F_SETFL,O_NONBLOCK);
+    // thread quan ly socket server khong ngu de xu ly cac socket khac thay vi chi ngu de xu ly server socket 
+    
     
     struct sockaddr_in client; 
     socklen_t client_size = sizeof(client);
@@ -88,6 +93,7 @@ int main()
     {
         int * client_fd = malloc(sizeof(int));// cap phat dong nham tranh viec 2 thread cung dung chung 1 dia chi 
         *client_fd = accept(fd_server,(struct sockaddr*)&client,&client_size);
+        fcntl(*client_fd,F_SETFL,O_NONBLOCK);
         pthread_mutex_lock(&m);
         counter_client++;
         pthread_mutex_unlock(&m);
