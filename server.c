@@ -12,8 +12,8 @@
 #include<fcntl.h>
 #include<sys/select.h>
 
-
-pthread_mutex_t m;
+#define MAX_CLIENT 50
+#define PORT 8080
 int counter_client = 0;
 void * handle_client(void * client_fd)
 {
@@ -53,9 +53,7 @@ void * handle_client(void * client_fd)
         send(*(int *)client_fd,msg,strlen(msg),0); 
     }
     close(*(int *)client_fd);
-    pthread_mutex_lock(&m);
     counter_client--;
-    pthread_mutex_unlock(&m);
     free(client_fd);
     
     return NULL;
@@ -64,7 +62,6 @@ void * handle_client(void * client_fd)
     
 }
 
-#define PORT 8080
 int main()
 {
     int fd_server = socket(AF_INET,SOCK_STREAM,0);
@@ -78,11 +75,12 @@ int main()
     // bind port vao cho socket object cua kernel
     bind(fd_server,(struct sockaddr*)&server,(socklen_t)sizeof(server));
     
-    // lang nghe yeu cau ket noi tu client
-    listen(fd_server,5);
-
     fcntl(fd_server,F_SETFL,O_NONBLOCK);
     // thread quan ly socket server khong ngu de xu ly cac socket khac thay vi chi ngu de xu ly server socket 
+    // lang nghe yeu cau ket noi tu client
+    int client_fds[MAX_CLIENT] = {0};
+    listen(fd_server,5);
+
     
     
     struct sockaddr_in client; 
@@ -91,17 +89,47 @@ int main()
         
     while(1)
     {
+        fd_set readfds;
+        FD_ZERO(&readfds);
+        FD_SET(fd_server,&readfds);
+        int max_fd = fd_server;
         int * client_fd = malloc(sizeof(int));// cap phat dong nham tranh viec 2 thread cung dung chung 1 dia chi 
-        *client_fd = accept(fd_server,(struct sockaddr*)&client,&client_size);
-        fcntl(*client_fd,F_SETFL,O_NONBLOCK);
-        pthread_mutex_lock(&m);
+        for(int i = 0; i < MAX_CLIENT; i++)
+        {
+            if(client_fds[i] == 0)
+            {
+                continue;
+            }
+            FD_SET(client_fds[i],&readfds);
+            if(client_fds[i] > max_fd)
+            {
+                max_fd = client_fds[i];
+            }
+        }
+        select(max_fd + 1,&readfds, NULL,NULL,NULL);
+        if(FD_ISSET(fd_server,&readfds))
+        {
+            *client_fd = accept(fd_server,(struct sockaddr *)&client,&client_size);
+            fcntl(*client_fd,F_SETFL,O_NONBLOCK);
+            for(int i = 0; i < MAX_CLIENT; i++)
+            {
+                if(client_fds[i] == 0)
+                {
+                    client_fds[i] = *client_fd;
+                    break;
+                }
+            }
+        }
+        for(int i = 0; i < MAX_CLIENT; i++)
+        {
+            if(client_fds[i] > 0 && FD_ISSET(client_fds[i],&readfds))
+            {
+                handle_client(&client_fds[i]);
+            }
+        }
+        
         counter_client++;
-        pthread_mutex_unlock(&m);
         printf("COUNTER_CLIENT:%d\n",counter_client);
-        pthread_t thread;
-        pthread_create(&thread,NULL,handle_client,client_fd);
-        pthread_detach(thread); // Khong cho thread khac dung chung tai nguyen 
-
     }
         
     close(fd_server);
