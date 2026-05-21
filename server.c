@@ -15,29 +15,45 @@
 #define MAX_CLIENT 50
 #define PORT 8080
 int counter_client = 0;
-void * handle_client(void * client_fd)
+void * handle_client(int client_fd, int * client_fds, const int * idx)
 {
-    int fd_client = *(int *)client_fd;
     
-    while(1)
-    {
     
         char buffer[1024] = {0};
     
-        recv(fd_client,buffer,1024,0);
+        int n = recv(client_fd,buffer,1024,0);
+        if(n == 0)
+        {
+            printf("Client disconnect !!!\n");
+            close(client_fd);
+            client_fds[*idx] = 0;
+            counter_client--;
+            return NULL;
+        }
+        if(n < 0)
+        {
+            if(errno = EAGAIN || errno = EWOULDBLOCK)
+            {
+                return NULL;
+            }
+            perror("recv");
+            return NULL;
+        }
         
         if(strcmp(buffer,"q!") == 0)
         { 
             printf("Closed !!!\n");
-            close(fd_client);
-            break;
+            close(client_fd);
+            client_fds[*idx] = 0;
+            counter_client--; 
+            return NULL;
         }
 
-        printf("Client_%d:%s\n",fd_client,buffer);
+        printf("Client_%d:%s\n",client_fd,buffer);
     
 
         char  * msg = "successfully connect !!!";
-        printf("Server_%d:%s\n",*(int*)client_fd,msg);
+        printf("Server_%d:%s\n",client_fd,msg);
         fflush(stdout);// ep chuong trinh in ra man hinh thay vi giu trong buffer
 //        int c;
 //       int i = 0; 
@@ -50,12 +66,7 @@ void * handle_client(void * client_fd)
            //msg[i++] = c;
         //}
  
-        send(*(int *)client_fd,msg,strlen(msg),0); 
-    }
-    close(*(int *)client_fd);
-    counter_client--;
-    free(client_fd);
-    
+        send(client_fd,msg,strlen(msg),0); 
     return NULL;
 
 
@@ -93,7 +104,7 @@ int main()
         FD_ZERO(&readfds);
         FD_SET(fd_server,&readfds);
         int max_fd = fd_server;
-        int * client_fd = malloc(sizeof(int));// cap phat dong nham tranh viec 2 thread cung dung chung 1 dia chi 
+        int client_fd;
         for(int i = 0; i < MAX_CLIENT; i++)
         {
             if(client_fds[i] == 0)
@@ -109,13 +120,15 @@ int main()
         select(max_fd + 1,&readfds, NULL,NULL,NULL);
         if(FD_ISSET(fd_server,&readfds))
         {
-            *client_fd = accept(fd_server,(struct sockaddr *)&client,&client_size);
-            fcntl(*client_fd,F_SETFL,O_NONBLOCK);
+            client_fd = accept(fd_server,(struct sockaddr *)&client,&client_size);
+            counter_client++;
+            printf("COUNTER_CLIENT:%d\n",counter_client);
+            fcntl(client_fd,F_SETFL,O_NONBLOCK);
             for(int i = 0; i < MAX_CLIENT; i++)
             {
                 if(client_fds[i] == 0)
                 {
-                    client_fds[i] = *client_fd;
+                    client_fds[i] = client_fd;
                     break;
                 }
             }
@@ -124,12 +137,11 @@ int main()
         {
             if(client_fds[i] > 0 && FD_ISSET(client_fds[i],&readfds))
             {
-                handle_client(&client_fds[i]);
+                handle_client(client_fds[i],client_fds,&i);
+                break;
             }
         }
         
-        counter_client++;
-        printf("COUNTER_CLIENT:%d\n",counter_client);
     }
         
     close(fd_server);
