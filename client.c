@@ -6,6 +6,35 @@
 #include<unistd.h>
 #include<string.h>
 
+void parseHTTPmsg(const char * buffer, char * payload)
+{
+    while(*buffer != '=')
+    {
+        buffer++;
+    }
+    buffer++;
+    while(*buffer != '\n')
+    {
+        buffer++;
+    }
+    buffer++;
+    while(*buffer != '=')
+    {
+        buffer++;
+    }
+    buffer++;
+    while(*buffer != '\n')
+    {
+        buffer++;
+    }
+    buffer++;
+    int idx = 0; 
+    while(*buffer != '\r') 
+    {
+        payload[idx++] = *buffer;
+        buffer++;
+    }
+}
 
 int main(){
     struct sockaddr_in client_addr;
@@ -46,13 +75,18 @@ int main(){
             printf("Dang thoat ...\n");
             break;
         }
-        send(fd_client , msg, strlen(msg),0);
+        int n = strlen(msg);
+        char req[1024] = {0};
+        sprintf(req,"method=POST\ncontent_length=%d\n%s\r\n",n,msg);
+        send(fd_client ,req, strlen(req),0);
 
         char buffer[1024] = {0};
 
         recv(fd_client,buffer,1024,0);
+        char res[512] = {0};
+        parseHTTPmsg(buffer,res);
 
-        printf("Server:%s\n",buffer);
+        printf("Server:%s\n",res);
     }
 
     close(fd_client);

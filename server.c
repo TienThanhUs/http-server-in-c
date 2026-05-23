@@ -15,8 +15,64 @@
 
 #define MAX_CLIENT 36
 #define PORT 8080
+#define MAX_FD 8192
+
+typedef struct{
+    char buffer[8192];
+    int buffer_length;
+    int content_length;
+    char *  payload;
+
+}Connection;
+
+
+Connection Conns[MAX_FD];
+
+void parseHTTPmsg(Connection * client,char * msg)
+{
+    char * temp = msg; 
+    while(*temp != '=')
+    {
+        temp++;
+    }
+    //temp dang o vi tri cua dau bang
+    temp++;
+    while(*temp != '\n') 
+    {
+        temp++;
+    }
+    temp++;
+    //ket thuc phan method
+    while(*temp != '=')
+    {
+        temp++;
+    }
+    //temp dang o vi tri cua dau bang
+    temp++;
+    char  content_length[10] = {0};
+    int idx = 0;
+    while(*temp != '\n') 
+    {
+        content_length[idx++] = *temp; 
+        temp++; 
+    }
+    temp++;
+    client->content_length = atoi(content_length);
+   // ket thuc phan content_length; 
+   client->payload = malloc(client->content_length * sizeof(char));
+   idx = 0;
+   while(*temp != '\r')
+   {
+       client->payload[idx++] = *temp;
+       temp++;
+   }
+   client->payload[idx++] = '\0';
+   free(client->payload);
+}
+
+
 int counter_client = 0;
-void * handle_client(const int * kq,int client_fd, struct kevent * events, const int * idx)
+void * handle_client(Connection * conn,const int * kq,int client_fd, struct kevent * events, const int * idx)
 {
     
     
@@ -52,12 +108,16 @@ void * handle_client(const int * kq,int client_fd, struct kevent * events, const
 
             return NULL;
         }
+        parseHTTPmsg(conn,buffer);
 
-        printf("Client_%d:%s\n",client_fd,buffer);
-    
+        printf("Client_%d:%s\n",client_fd,conn->payload);
+        char res[1024] = {0};
+        char * payload = "200 OK";
+        sprintf(res,"method=POST\ncontent_length=%d\n%s\r\n",(int)strlen(payload),payload);
 
-        char  * msg = "successfully connect !!!";
-        printf("Server_%d:%s\n",client_fd,msg);
+                    
+            
+        printf("Server_%d:%s\n",client_fd,payload);
         fflush(stdout);// ep chuong trinh in ra man hinh thay vi giu trong buffer
 //        int c;
 //       int i = 0; 
@@ -70,7 +130,7 @@ void * handle_client(const int * kq,int client_fd, struct kevent * events, const
            //msg[i++] = c;
         //}
  
-        send(client_fd,msg,strlen(msg),0); 
+        send(client_fd,res,strlen(res),0); 
     return NULL;
 
 
@@ -109,6 +169,7 @@ int main()
     struct kevent ke;
     EV_SET(&ke,fd_server,EVFILT_READ,EV_ADD,0,0,NULL);
     kevent(kq,&ke,1,NULL,0,NULL);
+    Conns[fd_server].buffer_length = 8192;
 
 
         
@@ -122,12 +183,15 @@ int main()
             {
                 struct kevent clientEV;
                 int client_fd = accept(fd_server,(struct sockaddr *)&client, &client_size);
+                Conns[client_fd].buffer_length = 8192; 
+                counter_client++;
+                printf("COUNTER_CLIENT:%d\n",counter_client);
                 fcntl(client_fd,F_SETFL,O_NONBLOCK);
                 EV_SET(&clientEV,client_fd,EVFILT_READ,EV_ADD,0,0,NULL);
                 kevent(kq,&clientEV,1,NULL,0,NULL);
                 continue;
             }
-            handle_client(&kq,events[i].ident ,events,&i);
+            handle_client(&Conns[events[i].ident],&kq,events[i].ident ,events,&i);
         } 
     }
         
