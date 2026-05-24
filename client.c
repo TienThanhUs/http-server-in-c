@@ -6,33 +6,78 @@
 #include<unistd.h>
 #include<string.h>
 
-void parseHTTPmsg(const char * buffer, char * payload)
+
+typedef struct{
+    char status_line[20];
+    char content_type[20];
+    int content_length;
+    char payload[200];
+    char version[20];
+}Connection;
+
+void parseHTTPmsg(Connection * conn, char * buffer)
 {
-    while(*buffer != '=')
+    char * pkg = buffer;
+    int idx = 0;
+    //PARSE STATUS LINE
+    while(*pkg != ' ')
     {
-        buffer++;
+        conn->version[idx++] = *pkg; 
+        pkg++; 
     }
-    buffer++;
-    while(*buffer != '\n')
+    pkg++;// bo qua dau cach
+   
+    idx = 0; 
+    while(*pkg != '\r')
     {
-        buffer++;
+        conn->status_line[idx++] = *pkg;
+        pkg++;
     }
-    buffer++;
-    while(*buffer != '=')
+    pkg += 2;
+    // bo qua dau \n;
+
+
+    //PARSE CONTENT TYPE
+    while(*pkg != ':')
     {
-        buffer++;
+        pkg++;
     }
-    buffer++;
-    while(*buffer != '\n')
+    pkg += 2;
+
+
+    idx = 0;
+    while(*pkg != '\r')
     {
-        buffer++;
+        conn->content_type[idx++] = *pkg;
+        pkg++;
     }
-    buffer++;
-    int idx = 0; 
-    while(*buffer != '\r') 
+    pkg += 2; 
+    //PARSE CONTENT_LENGTH
+    while(*pkg != ':')
     {
-        payload[idx++] = *buffer;
-        buffer++;
+        
+        pkg++;
+    }
+    
+    pkg += 2;// bo qua dau cach
+    
+    idx = 0;
+    char content_length[10] = {0};
+    while(*pkg != '\r')
+    {
+        content_length[idx++] = *pkg;
+        pkg++;
+    }
+    pkg += 2;// bo qua dau \n
+    pkg += 2;// bo qua \r\n vi theo cau truc goi tin thi sau content length se la 2 phan \r\n
+
+
+    //PARSE PAYLOAD
+    idx = 0; 
+    while(*pkg != '\0') 
+    {
+        conn -> payload[idx++] = *pkg;
+        pkg++;
     }
 }
 
@@ -50,15 +95,23 @@ int main(){
     server_addr.sin_port = htons(8080);
     server_addr.sin_addr.s_addr = inet_addr("127.0.0.1"); 
     
+    Connection conn = {0};
+    
     
 
     connect(fd_client,(struct sockaddr *)&server_addr,sizeof(server_addr));
     while(1)  
     {
+        printf("Choose your method:");
+        char method = getc(stdin) ;
+        int c;
+        while(( c = getchar()) != '\n'){}
+        fflush(stdout);
+
+        
         printf("Client:");
         fflush(stdout);
         char msg[1024] = {0};
-        int c;
         int i = 0;
         while((c = getc(stdin)) != '\n' && c != EOF)
         {
@@ -77,16 +130,28 @@ int main(){
         }
         int n = strlen(msg);
         char req[1024] = {0};
-        sprintf(req,"method=POST\ncontent_length=%d\n%s\r\n",n,msg);
+        char * str_method = "method";
+        if(method == 'p')
+        {
+            str_method = "POST";
+        }
+        else if(method == 'g')
+        {
+            str_method = "GET";
+        }
+        else if(method == 'd'){
+            str_method = "DELETE";
+        }
+        
+        sprintf(req,"%s /Course HTTP/1.1\r\ncontent_length : %d\r\n\r\n%s",str_method,n,msg);
         send(fd_client ,req, strlen(req),0);
 
         char buffer[1024] = {0};
 
         recv(fd_client,buffer,1024,0);
-        char res[512] = {0};
-        parseHTTPmsg(buffer,res);
+        parseHTTPmsg(&conn,buffer);
 
-        printf("Server:%s\n",res);
+        printf("Server:%s\n",conn.payload);
     }
 
     close(fd_client);

@@ -17,58 +17,103 @@
 #define PORT 8080
 #define MAX_FD 8192
 
+// da tao xong Struct Connection hoan chinh va khoi tao gia tri mac dinh
+// Sua ham handle client de co the xu ly tung streambyte thay vi happy case là nhan het request trong 1 luot 
+// Moi lan doc den \r\n thi doi state 
+// Su dung cac method chinh nhu GET POST, DELETE 
+// Cau truc goi tin 
+
+typedef enum{
+    PARSE_INIT,
+    PARSE_REQUEST_LINE,
+    PARSE_HEADERS,
+    PARSE_BODY,
+    PARSE_DONE
+}ParseState;
+
+
 typedef struct{
     char buffer[8192];
-    int buffer_length;
+    int read_pos; 
+    int parsed_pos;
+    ParseState state;
     int content_length;
-    char *  payload;
+    char  payload[256];
+    char version[16];
+    char path[256];
+    char method[16];
 
 }Connection;
 
 
-Connection Conns[MAX_FD];
+Connection Conns[MAX_FD] = {0};
+
 
 void parseHTTPmsg(Connection * client,char * msg)
 {
     char * temp = msg; 
-    while(*temp != '=')
-    {
-        temp++;
-    }
-    //temp dang o vi tri cua dau bang
-    temp++;
-    while(*temp != '\n') 
-    {
-        temp++;
-    }
-    temp++;
-    //ket thuc phan method
-    while(*temp != '=')
-    {
-        temp++;
-    }
-    //temp dang o vi tri cua dau bang
-    temp++;
-    char  content_length[10] = {0};
+    //PARSE PATH
     int idx = 0;
-    while(*temp != '\n') 
+    while(*temp != ' ')
     {
-        content_length[idx++] = *temp; 
+        client->method[idx++] = *temp;
+        temp++;
+    }
+    //temp dang o vi tri cua dau cach
+    temp++;
+    idx = 0;
+    while(*temp != ' ') 
+    {
+        client->path[idx++] = *temp;
+        temp++;
+    }
+    temp++;
+    idx = 0;
+    while(*temp != '\r')
+    {
+        client->version[idx++] = *temp;
         temp++; 
     }
-    temp++;
-    client->content_length = atoi(content_length);
-   // ket thuc phan content_length; 
-   client->payload = malloc(client->content_length * sizeof(char));
-   idx = 0;
-   while(*temp != '\r')
-   {
-       client->payload[idx++] = *temp;
-       temp++;
-   }
-   client->payload[idx++] = '\0';
-   free(client->payload);
+    temp += 2;// bo qua ki tu \n
+    idx = 0;
+    //ket thuc phan method
+
+
+
+
+    //PARSE CONTENT_LENGTH
+    while(*temp != ':')
+    {
+        temp++;
+    }
+    //temp dang o vi tri cua dau bang
+    temp += 2;
+    char contentLength[10] = {0};
+    idx = 0;
+    while(*temp != '\r')
+    {
+        contentLength[idx++ ] = *temp; 
+        temp++;
+    }
+    client->content_length = atoi(contentLength);
+    temp += 4;// bo qua dau \n
+
+
+
+
+
+
+
+    // PARSE PAYLOAD
+    idx = 0;
+    while(*temp != '\0') 
+    {
+        client->payload[idx++] = *temp;
+        temp++; 
+    }
+    
 }
+
 
 
 int counter_client = 0;
@@ -76,7 +121,7 @@ void * handle_client(Connection * conn,const int * kq,int client_fd, struct keve
 {
     
     
-        char buffer[1024] = {0};
+        char * buffer = conn->buffer;
     
         int n = recv(client_fd,buffer,1024,0);
         if(n == 0)
@@ -112,12 +157,34 @@ void * handle_client(Connection * conn,const int * kq,int client_fd, struct keve
 
         printf("Client_%d:%s\n",client_fd,conn->payload);
         char res[1024] = {0};
-        char * payload = "200 OK";
-        sprintf(res,"method=POST\ncontent_length=%d\n%s\r\n",(int)strlen(payload),payload);
 
-                    
-            
-        printf("Server_%d:%s\n",client_fd,payload);
+        char * response = "Loi ben server";
+    
+        if(strcmp(conn->method,"POST") == 0)
+        {
+            sprintf(res,"%s 201 Created\r\nContent-Type : text/plain\r\nContent-Length : 16\r\n\r\nResource created",conn->version);
+            response = "Resource created";
+
+
+        }
+
+
+        
+        else if(strcmp(conn->method,"GET") == 0)
+        {
+
+            sprintf(res,"%s 200 OK\r\nContent-Type : text/plain\r\nContent-Length : 17\r\n\r\nResource fetched",conn->version);
+            response = "Resource fetched";
+
+        }
+        else if(strcmp(conn->method,"DELETE") == 0){
+            sprintf(res,"%s 200 OK\r\nContent-Type : text/plain\r\nContent-Length : 16\r\n\r\nResource deleted",conn->version);
+            response = "Resource deleted";
+        }
+        
+
+
+        printf("Server_%d:%s\n",client_fd,response);
         fflush(stdout);// ep chuong trinh in ra man hinh thay vi giu trong buffer
 //        int c;
 //       int i = 0; 
@@ -169,21 +236,26 @@ int main()
     struct kevent ke;
     EV_SET(&ke,fd_server,EVFILT_READ,EV_ADD,0,0,NULL);
     kevent(kq,&ke,1,NULL,0,NULL);
-    Conns[fd_server].buffer_length = 8192;
+
+
+    // khoi tao version cho cac connection; 
+    for(int i = 0;i < MAX_FD; i++)
+    {
+        strcpy(Conns[i].version,"HTTP/1.1");
+    }
 
 
         
     while(1)
     {
-        struct kevent events[36];
-        int n = kevent(kq,NULL,0,events,36,NULL);
+        struct kevent events[MAX_CLIENT];
+        int n = kevent(kq,NULL,0,events,MAX_CLIENT,NULL);
         for(int i = 0; i < n; i++)
         {
             if(events[i].ident == fd_server)
             {
                 struct kevent clientEV;
                 int client_fd = accept(fd_server,(struct sockaddr *)&client, &client_size);
-                Conns[client_fd].buffer_length = 8192; 
                 counter_client++;
                 printf("COUNTER_CLIENT:%d\n",counter_client);
                 fcntl(client_fd,F_SETFL,O_NONBLOCK);
