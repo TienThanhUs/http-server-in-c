@@ -344,7 +344,15 @@ void close_client(
     printf("Client %d disconnected\n",client_fd);
 }
 
+void reset_connection(Connection *conn)
+{
+    memset(&conn->request,0,sizeof(HttpRequest));
 
+    conn->bytes_read = 0;
+    conn->parsed_offset = 0;
+
+    conn->parse_state = PARSE_REQUEST_LINE;
+}
 
 void handle_client_event(
     int kq,
@@ -393,8 +401,8 @@ void handle_client_event(
     printf("BODY    : %s\n",conn->request.body);
 
     send_response(conn);
+    reset_connection(conn);
 
-    close_client(kq,client_fd);
 }
 
 
