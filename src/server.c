@@ -1,272 +1,512 @@
 #include<stdio.h>
 #include<stdlib.h>
-#include<sys/socket.h>
-#include<sys/types.h>
-#include<netinet/in.h>
-#include<arpa/inet.h>
 #include<string.h>
 #include<unistd.h>
-#include<pthread.h>
-#include<sys/event.h>
-#include<sys/time.h>
 #include<fcntl.h>
-#include<sys/select.h>
-#include<sys/errno.h>
+#include<errno.h>
 
-#define MAX_CLIENT 36
-#define PORT 8080
-#define MAX_FD 8192
+#include<sys/socket.h>
+#include<sys/types.h>
+#include<sys/event.h>
 
-// da tao xong Struct Connection hoan chinh va khoi tao gia tri mac dinh
-// Sua ham handle client de co the xu ly tung streambyte thay vi happy case là nhan het request trong 1 luot 
-// Moi lan doc den \r\n thi doi state 
-// Su dung cac method chinh nhu GET POST, DELETE 
-// Cau truc goi tin 
+#include<netinet/in.h>
+#include<arpa/inet.h>
+
+#define SERVER_PORT 8080
+#define MAX_EVENTS 32
+#define MAX_CONNECTION 8192
+#define BUFFER_SIZE 8192
 
 typedef enum{
-    PARSE_INIT,
     PARSE_REQUEST_LINE,
     PARSE_HEADERS,
     PARSE_BODY,
     PARSE_DONE
 }ParseState;
 
+typedef struct{
+    char method[16];
+    char path[256];
+    char version[32];
+
+    int content_length;
+
+    char body[1024];
+}HttpRequest;
 
 typedef struct{
-    char buffer[8192];
-    int read_pos; 
-    int parsed_pos;
-    ParseState state;
-    int content_length;
-    char  payload[256];
-    char version[16];
-    char path[256];
-    char method[16];
+    int fd;
+
+    char read_buffer[BUFFER_SIZE];
+
+    int bytes_read;
+    int parsed_offset;
+
+    ParseState parse_state;
+
+    HttpRequest request;
 
 }Connection;
 
+Connection connections[MAX_CONNECTION] = {0};
 
-Connection Conns[MAX_FD] = {0};
 
 
-void parseHTTPmsg(Connection * client,char * msg)
+// =========================
+// SOCKET UTILS
+// =========================
+
+void set_nonblocking(int fd)
 {
-    char * temp = msg; 
-    //PARSE PATH
-    int idx = 0;
-    while(*temp != ' ')
-    {
-        client->method[idx++] = *temp;
-        temp++;
-    }
-    //temp dang o vi tri cua dau cach
-    temp++;
-    idx = 0;
-    while(*temp != ' ') 
-    {
-        client->path[idx++] = *temp;
-        temp++;
-    }
-    temp++;
-    idx = 0;
-    while(*temp != '\r')
-    {
-        client->version[idx++] = *temp;
-        temp++; 
-    }
-    temp += 2;// bo qua ki tu \n
-    idx = 0;
-    //ket thuc phan method
-
-
-
-
-    //PARSE CONTENT_LENGTH
-    while(*temp != ':')
-    {
-        temp++;
-    }
-    //temp dang o vi tri cua dau bang
-    temp += 2;
-    char contentLength[10] = {0};
-    idx = 0;
-    while(*temp != '\r')
-    {
-        contentLength[idx++ ] = *temp; 
-        temp++;
-    }
-    client->content_length = atoi(contentLength);
-    temp += 4;// bo qua dau \n
-
-
-
-
-
-
-
-    // PARSE PAYLOAD
-    idx = 0;
-    while(*temp != '\0') 
-    {
-        client->payload[idx++] = *temp;
-        temp++; 
-    }
-    
+    fcntl(fd,F_SETFL,O_NONBLOCK);
 }
 
 
 
-int counter_client = 0;
-void * handle_client(Connection * conn,const int * kq,int client_fd, struct kevent * events, const int * idx)
+// =========================
+// CONNECTION
+// =========================
+
+void init_connection(Connection *conn,int fd)
 {
-    
-    
-        char * buffer = conn->buffer;
-    
-        int n = recv(client_fd,buffer,1024,0);
-        if(n == 0)
+    memset(conn,0,sizeof(Connection));
+
+    conn->fd = fd;
+    conn->parse_state = PARSE_REQUEST_LINE;
+}
+
+
+
+// =========================
+// PARSER
+// =========================
+
+int find_crlf(char *buffer,int start,int end)
+{
+    for(int i = start; i < end - 1; i++)
+    {
+        if(buffer[i] == '\r' && buffer[i + 1] == '\n')
         {
-            printf("Client disconnect !!!\n");
-            EV_SET(&events[*idx],client_fd,EVFILT_READ,EV_DELETE,0,0,NULL);
-            kevent(*kq,&events[*idx],1,NULL,0,NULL);
-            close(client_fd);
-            counter_client--;
-            return NULL;
+            return i;
         }
-        if(n < 0)
+    }
+
+    return -1;
+}
+
+
+
+int parse_request_line(Connection *conn)
+{
+    int line_end = find_crlf(
+        conn->read_buffer,
+        conn->parsed_offset,
+        conn->bytes_read
+    );
+
+    if(line_end == -1)
+    {
+        return 0;
+    }
+
+    char line[1024] = {0};
+
+    int length = line_end - conn->parsed_offset;
+
+    memcpy(
+        line,
+        conn->read_buffer + conn->parsed_offset,
+        length
+    );
+
+    sscanf(
+        line,
+        "%15s %255s %31s",
+        conn->request.method,
+        conn->request.path,
+        conn->request.version
+    );
+
+    conn->parsed_offset = line_end + 2;
+    conn->parse_state = PARSE_HEADERS;
+
+    return 1;
+}
+
+
+
+int parse_headers(Connection *conn)
+{
+    while(1)
+    {
+        int line_end = find_crlf(
+            conn->read_buffer,
+            conn->parsed_offset,
+            conn->bytes_read
+        );
+
+        if(line_end == -1)
         {
-            if(errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;
+        }
+
+        // empty line => end header
+        if(line_end == conn->parsed_offset)
+        {
+            conn->parsed_offset += 2;
+
+            if(conn->request.content_length > 0)
             {
-                return NULL;
+                conn->parse_state = PARSE_BODY;
             }
-            perror("recv");
-            return NULL;
+            else{
+                conn->parse_state = PARSE_DONE;
+            }
+
+            return 1;
         }
-        
-        if(strcmp(buffer,"q!") == 0)
-        { 
-            printf("Closed !!!\n");
-            EV_SET(&events[*idx],client_fd,EVFILT_READ,EV_DELETE,0,0,NULL);
-            kevent(*kq,&events[*idx],1,NULL,0,NULL);
-            close(client_fd);
-            counter_client--;
 
-            return NULL;
-        }
-        parseHTTPmsg(conn,buffer);
+        char header_line[1024] = {0};
 
-        printf("Client_%d:%s\n",client_fd,conn->payload);
-        char res[1024] = {0};
+        int length = line_end - conn->parsed_offset;
 
-        char * response = "Loi ben server";
-    
-        if(strcmp(conn->method,"POST") == 0)
+        memcpy(
+            header_line,
+            conn->read_buffer + conn->parsed_offset,
+            length
+        );
+
+        if(strncmp(header_line,"Content-Length:",15) == 0)
         {
-            sprintf(res,"%s 201 Created\r\nContent-Type : text/plain\r\nContent-Length : 16\r\n\r\nResource created",conn->version);
-            response = "Resource created";
-
-
+            conn->request.content_length = atoi(header_line + 16);
         }
 
-
-        
-        else if(strcmp(conn->method,"GET") == 0)
-        {
-
-            sprintf(res,"%s 200 OK\r\nContent-Type : text/plain\r\nContent-Length : 17\r\n\r\nResource fetched",conn->version);
-            response = "Resource fetched";
-
-        }
-        else if(strcmp(conn->method,"DELETE") == 0){
-            sprintf(res,"%s 200 OK\r\nContent-Type : text/plain\r\nContent-Length : 16\r\n\r\nResource deleted",conn->version);
-            response = "Resource deleted";
-        }
-        
-
-
-        printf("Server_%d:%s\n",client_fd,response);
-        fflush(stdout);// ep chuong trinh in ra man hinh thay vi giu trong buffer
-//        int c;
-//       int i = 0; 
-       // while((c = getc(stdin)) != '\n' && c != EOF)
-        //{
-         //  if(i >= 1024)
-           //{
-            //   break;
-           //}
-           //msg[i++] = c;
-        //}
- 
-        send(client_fd,res,strlen(res),0); 
-    return NULL;
-
-
-    
+        conn->parsed_offset = line_end + 2;
+    }
 }
+
+
+
+int parse_body(Connection *conn)
+{
+    int remain = conn->bytes_read - conn->parsed_offset;
+
+    if(remain < conn->request.content_length)
+    {
+        return 0;
+    }
+
+    memcpy(
+        conn->request.body,
+        conn->read_buffer + conn->parsed_offset,
+        conn->request.content_length
+    );
+
+    conn->request.body[conn->request.content_length] = '\0';
+
+    conn->parsed_offset += conn->request.content_length;
+
+    conn->parse_state = PARSE_DONE;
+
+    return 1;
+}
+
+
+
+int parse_http_request(Connection *conn)
+{
+    while(1)
+    {
+        if(conn->parse_state == PARSE_REQUEST_LINE)
+        {
+            if(!parse_request_line(conn))
+            {
+                return 0;
+            }
+        }
+
+        else if(conn->parse_state == PARSE_HEADERS)
+        {
+            if(!parse_headers(conn))
+            {
+                return 0;
+            }
+        }
+
+        else if(conn->parse_state == PARSE_BODY)
+        {
+            if(!parse_body(conn))
+            {
+                return 0;
+            }
+        }
+
+        else if(conn->parse_state == PARSE_DONE)
+        {
+            return 1;
+        }
+    }
+}
+
+
+
+// =========================
+// RESPONSE
+// =========================
+
+void send_response(Connection *conn)
+{
+    char response[2048] = {0};
+
+    char *message = "Unknown";
+
+    if(strcmp(conn->request.method,"GET") == 0)
+    {
+        message = "Resource fetched";
+
+        sprintf(
+            response,
+            "%s 200 OK\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: %ld\r\n"
+            "\r\n"
+            "%s",
+            conn->request.version,
+            strlen(message),
+            message
+        );
+    }
+
+    else if(strcmp(conn->request.method,"POST") == 0)
+    {
+        message = "Resource created";
+
+        sprintf(
+            response,
+            "%s 201 Created\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: %ld\r\n"
+            "\r\n"
+            "%s",
+            conn->request.version,
+            strlen(message),
+            message
+        );
+    }
+
+    else if(strcmp(conn->request.method,"DELETE") == 0)
+    {
+        message = "Resource deleted";
+
+        sprintf(
+            response,
+            "%s 200 OK\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: %ld\r\n"
+            "\r\n"
+            "%s",
+            conn->request.version,
+            strlen(message),
+            message
+        );
+    }
+
+    send(conn->fd,response,strlen(response),0);
+}
+
+
+
+// =========================
+// CLIENT HANDLER
+// =========================
+
+void close_client(
+    int kq,
+    int client_fd
+)
+{
+    struct kevent ev;
+
+    EV_SET(
+        &ev,
+        client_fd,
+        EVFILT_READ,
+        EV_DELETE,
+        0,
+        0,
+        NULL
+    );
+
+    kevent(kq,&ev,1,NULL,0,NULL);
+
+    close(client_fd);
+
+    printf("Client %d disconnected\n",client_fd);
+}
+
+
+
+void handle_client_event(
+    int kq,
+    int client_fd
+)
+{
+    Connection *conn = &connections[client_fd];
+
+    int n = recv(
+        client_fd,
+        conn->read_buffer + conn->bytes_read,
+        BUFFER_SIZE - conn->bytes_read,
+        0
+    );
+
+    if(n == 0)
+    {
+        close_client(kq,client_fd);
+        return;
+    }
+
+    if(n < 0)
+    {
+        if(errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            return;
+        }
+
+        perror("recv");
+        close_client(kq,client_fd);
+        return;
+    }
+
+    conn->bytes_read += n;
+
+    if(!parse_http_request(conn))
+    {
+        return;
+    }
+
+    printf("\n===== HTTP REQUEST =====\n");
+
+    printf("METHOD  : %s\n",conn->request.method);
+    printf("PATH    : %s\n",conn->request.path);
+    printf("VERSION : %s\n",conn->request.version);
+    printf("BODY    : %s\n",conn->request.body);
+
+    send_response(conn);
+
+    close_client(kq,client_fd);
+}
+
+
+
+// =========================
+// SERVER
+// =========================
 
 int main()
 {
-    int fd_server = socket(AF_INET,SOCK_STREAM,0);
+    int server_fd = socket(AF_INET,SOCK_STREAM,0);
 
-    //them cau hinh cho server
-    struct sockaddr_in server; 
-    server.sin_family = AF_INET;
-    server.sin_port = htons(PORT);
-    server.sin_addr.s_addr = INADDR_ANY;
+    struct sockaddr_in server_addr;
 
-    // bind port vao cho socket object cua kernel
-    bind(fd_server,(struct sockaddr*)&server,(socklen_t)sizeof(server));
-    
-    fcntl(fd_server,F_SETFL,O_NONBLOCK);
-    // thread quan ly socket server khong ngu de xu ly cac socket khac thay vi chi ngu de xu ly server socket 
-    // lang nghe yeu cau ket noi tu client
-    listen(fd_server,5);
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(SERVER_PORT);
+    server_addr.sin_addr.s_addr = INADDR_ANY;
 
-    
-    
-    struct sockaddr_in client; 
-    socklen_t client_size = sizeof(client);
-    // tao 1 socket dung rieng cho viec giao tiep
-    
+    bind(
+        server_fd,
+        (struct sockaddr*)&server_addr,
+        sizeof(server_addr)
+    );
 
-    //tao kqueue 
+    listen(server_fd,5);
+
+    set_nonblocking(server_fd);
+
     int kq = kqueue();
 
-    //tao struct kevent 
-    struct kevent ke;
-    EV_SET(&ke,fd_server,EVFILT_READ,EV_ADD,0,0,NULL);
-    kevent(kq,&ke,1,NULL,0,NULL);
+    struct kevent server_event;
 
+    EV_SET(
+        &server_event,
+        server_fd,
+        EVFILT_READ,
+        EV_ADD,
+        0,
+        0,
+        NULL
+    );
 
-    // khoi tao version cho cac connection; 
-    for(int i = 0;i < MAX_FD; i++)
-    {
-        strcpy(Conns[i].version,"HTTP/1.1");
-    }
+    kevent(kq,&server_event,1,NULL,0,NULL);
 
+    printf("Server listening at port %d\n",SERVER_PORT);
 
-        
     while(1)
     {
-        struct kevent events[MAX_CLIENT];
-        int n = kevent(kq,NULL,0,events,MAX_CLIENT,NULL);
-        for(int i = 0; i < n; i++)
-        {
-            if(events[i].ident == fd_server)
-            {
-                struct kevent clientEV;
-                int client_fd = accept(fd_server,(struct sockaddr *)&client, &client_size);
-                counter_client++;
-                printf("COUNTER_CLIENT:%d\n",counter_client);
-                fcntl(client_fd,F_SETFL,O_NONBLOCK);
-                EV_SET(&clientEV,client_fd,EVFILT_READ,EV_ADD,0,0,NULL);
-                kevent(kq,&clientEV,1,NULL,0,NULL);
-                continue;
-            }
-            handle_client(&Conns[events[i].ident],&kq,events[i].ident ,events,&i);
-        } 
-    }
-        
-    close(fd_server);
+        struct kevent events[MAX_EVENTS];
 
+        int event_count = kevent(
+            kq,
+            NULL,
+            0,
+            events,
+            MAX_EVENTS,
+            NULL
+        );
+
+        for(int i = 0; i < event_count; i++)
+        {
+            int current_fd = events[i].ident;
+
+            // new client
+            if(current_fd == server_fd)
+            {
+                struct sockaddr_in client_addr;
+                socklen_t client_size = sizeof(client_addr);
+
+                int client_fd = accept(
+                    server_fd,
+                    (struct sockaddr*)&client_addr,
+                    &client_size
+                );
+
+                set_nonblocking(client_fd);
+
+                init_connection(
+                    &connections[client_fd],
+                    client_fd
+                );
+
+                struct kevent client_event;
+
+                EV_SET(
+                    &client_event,
+                    client_fd,
+                    EVFILT_READ,
+                    EV_ADD,
+                    0,
+                    0,
+                    NULL
+                );
+
+                kevent(kq,&client_event,1,NULL,0,NULL);
+
+                printf(
+                    "New client: %d\n",
+                    client_fd
+                );
+            }
+
+            else{
+                handle_client_event(
+                    kq,
+                    current_fd
+                );
+            }
+        }
+    }
+
+    close(server_fd);
+
+    return 0;
 }
